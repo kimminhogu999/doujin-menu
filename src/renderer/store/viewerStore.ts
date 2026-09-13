@@ -3,6 +3,7 @@ import { watchDebounced } from "@vueuse/core";
 import { defineStore } from "pinia";
 import { computed, nextTick, ref, toRaw, watch } from "vue";
 import { useRouter } from "vue-router";
+import type { FilterParams } from "../../types/ipc";
 import {
   nextSortBy,
   toggledSortOrder,
@@ -10,15 +11,7 @@ import {
   SORT_LABELS,
 } from "./sortCycle";
 
-export interface FilterParams {
-  searchQuery?: string;
-  libraryPath?: string;
-  readStatus?: "all" | "read" | "unread";
-  sortBy?: string;
-  sortOrder?: "asc" | "desc";
-  isFavorite?: boolean;
-  offlineStatus?: "all" | "online" | "offline";
-}
+export type { FilterParams };
 
 export const useViewerStore = defineStore("viewer", () => {
   const router = useRouter();
@@ -326,11 +319,11 @@ export const useViewerStore = defineStore("viewer", () => {
 
     const newPage = currentPage.value + increment;
 
+    // 마지막 장을 넘어가면 곧바로 다음 책이나 토스트로 간다.
+    // 더블 페이지에서 goToPage(totalPages)로 한 번 더 보정하면 펼침 시작 페이지로
+    // 다시 정렬돼 제자리로 돌아오고, 아래 분기에 영영 닿지 못한다
     if (newPage <= totalPages.value) {
       goToPage(newPage);
-    } else if (currentPage.value < totalPages.value) {
-      // 마지막 페이지를 넘어가지 않도록 처리
-      goToPage(totalPages.value);
     } else if (isAutoNextBook.value) {
       loadNextBook();
     } else {
@@ -419,6 +412,10 @@ export const useViewerStore = defineStore("viewer", () => {
     });
   }
 
+  function toggleNextBookMode() {
+    setNextBookMode(autoNextBookMode.value === "next" ? "random" : "next");
+  }
+
   // 정렬 기준을 순환(added_at → title → ... → hitomi_id → added_at).
   // filterParams를 갱신하면 이후 loadNextBook/loadPrevBook이 새 기준을 따른다.
   function cycleSortBy() {
@@ -484,11 +481,19 @@ export const useViewerStore = defineStore("viewer", () => {
 
   function setShowCoverAlone(value: boolean) {
     viewerShowCoverAlone.value = value;
-    const status = value ? "켜짐" : "꺼짐";
-    showToastMessage(`표지 따로 보기: ${status}`);
+    showToastMessage(`표지 따로 보기: ${value ? "켜짐" : "꺼짐"}`);
     ipcRenderer.invoke("set-config", { key: "viewerShowCoverAlone", value });
     // Adjust current page to be the start of a spread
     goToPage(currentPage.value);
+  }
+
+  // 펼침 짝을 한 칸 밀거나 되돌린다. 더블 페이지에서만 의미가 있다
+  function toggleShowCoverAlone() {
+    if (!viewerDoublePageView.value || readingMode.value === "webtoon") {
+      showToastMessage("더블 페이지 모드에서만 바꿀 수 있습니다.");
+      return;
+    }
+    setShowCoverAlone(!viewerShowCoverAlone.value);
   }
 
   function setViewerAutoFitZoom(value: boolean) {
@@ -599,8 +604,7 @@ export const useViewerStore = defineStore("viewer", () => {
     }
     if (config.viewerAutoNextBookMode !== undefined) {
       autoNextBookMode.value = config.viewerAutoNextBookMode as
-        | "next"
-        | "random";
+        "next" | "random";
     }
     if (config.viewerAutoPlayStopPage !== undefined) {
       autoPlayStopPage.value = config.viewerAutoPlayStopPage as number | null;
@@ -807,6 +811,7 @@ export const useViewerStore = defineStore("viewer", () => {
     stopAutoPlay,
     toggleAutoNextBook,
     setNextBookMode,
+    toggleNextBookMode,
     cycleSortBy,
     toggleSortOrder,
     toggleReadingDirection,
@@ -828,6 +833,7 @@ export const useViewerStore = defineStore("viewer", () => {
     rightPageUrl,
     setDoublePage,
     setShowCoverAlone,
+    toggleShowCoverAlone,
     setViewerAutoFitZoom,
     setViewerRestoreLastSession,
     toggleHidePageNumber,

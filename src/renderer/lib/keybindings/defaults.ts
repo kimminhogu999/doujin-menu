@@ -63,6 +63,12 @@ export const defaultActions: ActionDefinition[] = [
     defaultKeys: ["a"],
   },
   {
+    id: "viewer:toggle-next-book-mode",
+    description: "재생 순서 전환 (순차/랜덤)",
+    context: "viewer",
+    defaultKeys: ["m"],
+  },
+  {
     id: "viewer:zoom-in",
     description: "확대",
     context: "viewer",
@@ -207,6 +213,12 @@ export const defaultActions: ActionDefinition[] = [
     defaultKeys: ["2"],
   },
   {
+    id: "viewer:toggle-cover-alone",
+    description: "펼침 짝 전환 (표지 따로 보기)",
+    context: "viewer",
+    defaultKeys: ["3"],
+  },
+  {
     id: "viewer:toggle-reading-direction",
     description: "읽기 방향 전환 (좌↔우)",
     context: "viewer",
@@ -246,7 +258,7 @@ export const defaultActions: ActionDefinition[] = [
   },
   {
     id: "library:cycle-read-status",
-    description: "읽음 상태 순환 (모두→읽음→안읽음)",
+    description: "읽음 상태 순환 (모두→안읽음→읽는중→완독)",
     context: "library",
     defaultKeys: ["r"],
   },
@@ -267,6 +279,49 @@ export const defaultActions: ActionDefinition[] = [
     description: "다음 라이브러리 폴더",
     context: "library",
     defaultKeys: ["]"],
+  },
+  {
+    id: "library:focus-left",
+    description: "왼쪽 책 선택",
+    context: "library",
+    defaultKeys: ["ArrowLeft"],
+  },
+  {
+    id: "library:focus-right",
+    description: "오른쪽 책 선택",
+    context: "library",
+    defaultKeys: ["ArrowRight"],
+  },
+  {
+    id: "library:focus-up",
+    description: "위쪽 책 선택",
+    context: "library",
+    defaultKeys: ["ArrowUp"],
+  },
+  {
+    id: "library:focus-down",
+    description: "아래쪽 책 선택",
+    context: "library",
+    defaultKeys: ["ArrowDown"],
+  },
+  {
+    id: "library:open-focused",
+    description: "선택한 책 열기",
+    context: "library",
+    defaultKeys: ["Enter"],
+  },
+  {
+    id: "library:open-focused-new-window",
+    description: "선택한 책 새 창으로 열기",
+    context: "library",
+    defaultKeys: ["Ctrl+Enter"],
+  },
+  {
+    // 선택한 책이 없으면 처리하지 않고 넘겨, 레이아웃의 창 최소화가 그대로 걸린다
+    id: "library:clear-focus",
+    description: "선택 해제",
+    context: "library",
+    defaultKeys: ["Escape"],
   },
 
   // === 레이아웃 ===

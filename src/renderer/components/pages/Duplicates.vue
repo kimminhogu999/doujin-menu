@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { deleteDuplicateBooks, getDuplicateGroups } from "@/api";
+import {
+  backfillCoverHashes,
+  deleteDuplicateBooks,
+  getDuplicateGroups,
+  ipcRenderer,
+} from "@/api";
 import SmartSearchInput from "@/components/common/SmartSearchInput.vue";
 import SortMenu from "@/components/common/SortMenu.vue";
 import ViewOptionsBar from "@/components/common/ViewOptionsBar.vue";
@@ -30,23 +35,64 @@ import {
   formatBytes,
   groupReclaimableSize,
   groupTitle,
+  matchTypeBadgeVariant,
+  matchTypeLabel,
   sortGroups,
   summarizeGroups,
   type DuplicateSortBy,
 } from "@/lib/duplicateCompare";
+import {
+  computeListCols,
+  LIST_GAP,
+  MIN_LIST_CARD_WIDTH,
+} from "@/lib/virtualList";
+import { useUiStore } from "@/store/uiStore";
 import { Icon } from "@iconify/vue";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { toast } from "vue-sonner";
-import type { DuplicateBookInfo, DuplicateGroup } from "../../../types/ipc";
+import type {
+  CoverHashProgress,
+  DuplicateBookInfo,
+  DuplicateGroup,
+} from "../../../types/ipc";
 import BookPreviewDialog from "../feature/BookPreviewDialog.vue";
 import DuplicateBookRow from "../feature/DuplicateBookRow.vue";
 import PageHeader from "../layout/PageHeader.vue";
 import PageToolbar from "../layout/PageToolbar.vue";
 
 const queryClient = useQueryClient();
+const uiStore = useUiStore();
 
 const { handleZoomWheel } = useZoomWheel();
+
+/**
+ * 그룹 안 카드를 몇 열로 깔지. 다른 목록 화면(`useVirtualCardList`)과 같은
+ * 기준을 쓴다 — 이 화면은 가상 스크롤을 안 써서 열 수만 따로 계산한다.
+ */
+const scrollerRef = ref<HTMLElement | null>(null);
+const scrollerWidth = ref(0);
+
+const listCols = computed(() =>
+  computeListCols(
+    scrollerWidth.value,
+    uiStore.thumbnailZoom,
+    0,
+    LIST_GAP,
+    MIN_LIST_CARD_WIDTH,
+  ),
+);
+
+let resizeObserver: ResizeObserver | null = null;
+watch(scrollerRef, (el) => {
+  resizeObserver?.disconnect();
+  if (!el) return;
+  scrollerWidth.value = el.clientWidth;
+  resizeObserver = new ResizeObserver(() => {
+    scrollerWidth.value = el.clientWidth;
+  });
+  resizeObserver.observe(el);
+});
 
 // 중복 그룹 목록 조회
 const { data, status, isFetching, refetch } = useQuery<DuplicateGroup[]>({
@@ -55,6 +101,38 @@ const { data, status, isFetching, refetch } = useQuery<DuplicateGroup[]>({
 });
 
 const groups = computed(() => data.value ?? []);
+
+// 표지 해시 백필. 대상이 없으면 즉시 끝나므로 두 번째 진입부터는 체감이 없다
+const hashProgress = ref<CoverHashProgress | null>(null);
+
+const handleHashProgress = (
+  _event: Electron.IpcRendererEvent,
+  progress: CoverHashProgress,
+) => {
+  hashProgress.value = progress;
+};
+
+onMounted(async () => {
+  ipcRenderer.on("cover-hash-progress", handleHashProgress);
+  try {
+    const hashed = await backfillCoverHashes();
+    // 새로 채운 게 있을 때만 다시 가져온다. 없으면 방금 받은 목록이 이미 최신이다
+    if (hashed > 0) {
+      queryClient.invalidateQueries({ queryKey: ["duplicateGroups"] });
+    }
+  } catch (error) {
+    console.error("표지 해시 생성 실패:", error);
+    toast.error("표지 해시 생성에 실패했습니다.");
+  } finally {
+    hashProgress.value = null;
+  }
+});
+
+// keep-alive 아래에서 재마운트되므로 반드시 풀어줘야 핸들러가 쌓이지 않는다
+onUnmounted(() => {
+  ipcRenderer.off("cover-hash-progress", handleHashProgress);
+  resizeObserver?.disconnect();
+});
 
 // 검색·필터·정렬
 const searchQuery = ref("");
@@ -133,9 +211,6 @@ const openPreview = (book: DuplicateBookInfo) => {
   previewBook.value = book;
   isPreviewOpen.value = true;
 };
-
-const getMatchTypeLabel = (matchType: DuplicateGroup["matchType"]) =>
-  matchType === "hitomi_id" ? "ID 일치" : "제목 일치";
 
 const toggleSelect = (bookId: number) => {
   const next = new Set(selectedIds.value);
@@ -242,6 +317,14 @@ const confirmPermanent = () => performDelete(true);
       </template>
     </PageHeader>
 
+    <div
+      v-if="hashProgress"
+      class="bg-muted text-muted-foreground flex items-center gap-2 rounded-md px-3 py-2 text-sm"
+    >
+      <Icon icon="solar:refresh-bold-duotone" class="h-4 w-4 animate-spin" />
+      표지 정보 준비 중 {{ hashProgress.current }} / {{ hashProgress.total }}
+    </div>
+
     <div class="flex min-h-0 flex-1 flex-col gap-4">
       <PageToolbar>
         <template #search>
@@ -280,6 +363,18 @@ const confirmPermanent = () => performDelete(true);
               >
                 제목 일치
               </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                :model-value="matchTypeFilter === 'title_normalized'"
+                @click="matchTypeFilter = 'title_normalized'"
+              >
+                제목 유사
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                :model-value="matchTypeFilter === 'cover_hash'"
+                @click="matchTypeFilter = 'cover_hash'"
+              >
+                표지 유사
+              </DropdownMenuCheckboxItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </template>
@@ -316,7 +411,11 @@ const confirmPermanent = () => performDelete(true);
       </PageToolbar>
 
       <!-- 본문 (스크롤 영역) -->
-      <div class="min-h-0 flex-1 overflow-y-auto pr-2" @wheel="handleZoomWheel">
+      <div
+        ref="scrollerRef"
+        class="min-h-0 flex-1 overflow-y-auto pr-2"
+        @wheel="handleZoomWheel"
+      >
         <div v-if="status === 'pending'" class="p-4 text-center">
           <p>중복 목록을 불러오는 중...</p>
         </div>
@@ -367,12 +466,8 @@ const confirmPermanent = () => performDelete(true);
                 "
                 class="h-4 w-4 flex-shrink-0"
               />
-              <Badge
-                :variant="
-                  group.matchType === 'hitomi_id' ? 'default' : 'secondary'
-                "
-              >
-                {{ getMatchTypeLabel(group.matchType) }}
+              <Badge :variant="matchTypeBadgeVariant(group.matchType)">
+                {{ matchTypeLabel(group.matchType) }}
               </Badge>
               <span class="truncate text-sm font-semibold">
                 {{ groupTitle(group) }}
@@ -397,7 +492,13 @@ const confirmPermanent = () => performDelete(true);
               </span>
             </div>
 
-            <div v-if="!isCollapsed(group)" class="space-y-2">
+            <div
+              v-if="!isCollapsed(group)"
+              class="grid gap-2"
+              :style="{
+                gridTemplateColumns: `repeat(${listCols}, minmax(0, 1fr))`,
+              }"
+            >
               <DuplicateBookRow
                 v-for="book in group.books"
                 :key="book.id"

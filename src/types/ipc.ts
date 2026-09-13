@@ -1,11 +1,15 @@
 // IPC 통신을 위한 타입 정의
-import type { Gallery } from "node-hitomi";
 import type { Config } from "../main/handlers/configHandler.js";
+
+/** 읽음 상태 구간. 한 권은 반드시 한 구간에만 속한다 */
+export type ReadStatus = "unread" | "reading" | "completed";
 
 export interface FilterParams {
   searchQuery?: string;
-  libraryPath?: string;
-  readStatus?: "all" | "read" | "unread";
+  /** 고른 라이브러리 폴더들. 비었으면 전체 */
+  libraryPath?: string[];
+  /** 고른 읽음 상태 구간들. 비었으면 전체 */
+  readStatus?: ReadStatus[];
   sortBy?: string; // title, added_at, file_mtime, last_read_at, artists, page_count, hitomi_id, random
   sortOrder?: "asc" | "desc";
   isFavorite?: boolean;
@@ -49,6 +53,7 @@ export interface Book {
   page_count?: number;
   current_page?: number;
   is_favorite: boolean;
+  rating?: number; // 0(미평가)~5
   is_offline?: boolean; // 라이브러리 폴더 접근 불가(외장하드 분리 등) 시 true
   last_read_at?: string;
   hitomi_id?: string;
@@ -92,15 +97,15 @@ export interface SeriesCollectionWithBooks extends SeriesCollection {
 }
 
 export type DownloadQueueStatus =
-  | "pending"
-  | "downloading"
-  | "completed"
-  | "failed"
-  | "paused";
+  "pending" | "downloading" | "completed" | "failed" | "paused";
 
 export interface DownloadQueueItem {
   id: number;
-  gallery_id: number;
+  /** 다운로드 소스. 현재는 히토미뿐입니다. */
+  source: string;
+  /** 소스별 원본 식별자. 히토미는 갤러리 ID를 문자열로 적습니다. */
+  source_key: string;
+  gallery_id: number | null;
   gallery_title: string;
   gallery_artist?: string;
   thumbnail_url?: string;
@@ -115,6 +120,31 @@ export interface DownloadQueueItem {
   started_at?: string;
   completed_at?: string;
   priority: number;
+}
+
+/**
+ * 히토미 갤러리를 렌더러로 넘기는 모양입니다.
+ *
+ * node-hitomi의 Gallery를 그대로 실어 보내지 않습니다. 그쪽은 클래스라
+ * 직렬화를 거치면 메서드가 사라져 타입만 남고, 태그도 이름 대신 Tag 객체로
+ * 옵니다. 렌더러가 실제로 쓰는 필드만 평면으로 추립니다.
+ */
+export interface GalleryDto {
+  id: number;
+  title: { display: string };
+  type: string;
+  /** 현지어 이름이 없는 언어는 local이 비어 있고, 언어 자체가 없으면 null입니다 */
+  languageName: { english: string; local: string } | null;
+  artists: string[];
+  groups: string[];
+  series: string[];
+  characters: string[];
+  tags: { type: string; name: string }[];
+  /** 페이지 수. 파일 목록 전체는 렌더러가 쓰지 않아 싣지 않습니다 */
+  pageCount: number;
+  /** 발행일이 있으면 발행일, 없으면 히토미에 올라온 날짜 */
+  releaseDate: Date;
+  thumbnailUrl: string;
 }
 
 /** 구독 = 다운로더 검색어 문자열 하나 */
@@ -157,6 +187,11 @@ export interface Statistics {
   topArtistsByViews: { name: string; view_count: number }[];
   topTagsByViews: { name: string; view_count: number }[];
   typeDistribution: { type: string; count: number }[];
+  ratingStats: {
+    average: number;
+    ratedCount: number;
+    distribution: { rating: number; count: number }[];
+  };
   mostViewedBooks: { id: number; title: string; view_count: number }[];
   longestBook?: { id: number; title: string; page_count: number };
   shortestBook?: { id: number; title: string; page_count: number };
@@ -176,10 +211,14 @@ export interface DuplicateBookInfo extends Book {
   file_mtime: number | null;
 }
 
-// 중복 그룹 (hitomi_id 또는 제목 일치)
+// 중복 그룹 (hitomi_id / 제목 완전 일치 / 정규화 제목 일치 / 표지 해시 유사)
 export interface DuplicateGroup {
   key: string;
-  matchType: "hitomi_id" | "title";
+  /**
+   * 아래로 갈수록 근거가 약하다. title_normalized는 표기 차이를 걷어낸 뒤에야
+   * 묶인 그룹이고, cover_hash는 표지만 비슷할 뿐 다른 작품일 수 있다.
+   */
+  matchType: "hitomi_id" | "title" | "title_normalized" | "cover_hash";
   books: DuplicateBookInfo[];
 }
 
@@ -318,6 +357,10 @@ export interface IpcChannels {
     request: { bookId: number; isFavorite: boolean };
     response: { success: boolean; is_favorite?: boolean; error?: unknown };
   };
+  "set-book-rating": {
+    request: { bookId: number; rating: number };
+    response: { success: boolean; rating?: number; error?: unknown };
+  };
   "open-book-folder": {
     request: string; // bookPath
     response: { success: boolean; error?: string };
@@ -388,6 +431,10 @@ export interface IpcChannels {
   "delete-duplicate-books": {
     request: { bookIds: number[]; permanent: boolean };
     response: DeleteDuplicatesResult;
+  };
+  "backfill-cover-hashes": {
+    request: void;
+    response: { success: boolean; hashedCount?: number; error?: string };
   };
 
   "get-library-size": {
@@ -553,7 +600,7 @@ export interface IpcChannels {
     request: number; // galleryId
     response: {
       success: boolean;
-      data?: Gallery & { thumbnailUrl: string };
+      data?: GalleryDto;
       error?: string;
     };
   };
@@ -581,7 +628,9 @@ export interface IpcChannels {
   };
   "add-to-download-queue": {
     request: {
-      galleryId: number;
+      /** 생략하면 String(galleryId)를 씁니다. */
+      sourceKey?: string;
+      galleryId?: number;
       galleryTitle: string;
       galleryArtist?: string;
       thumbnailUrl?: string;
@@ -979,6 +1028,12 @@ export interface InfoGenerationProgress {
   message: string;
 }
 
+// 표지 해시 백필 진행률
+export interface CoverHashProgress {
+  total: number;
+  current: number;
+}
+
 // 업데이트 상태 브로드캐스트 페이로드
 export interface UpdateStatusEvent {
   status:
@@ -1006,6 +1061,7 @@ export interface IpcListenChannels {
   "library-scan-completed": void;
   "library-scan-progress": LibraryScanProgress;
   "info-generation-progress": InfoGenerationProgress;
+  "cover-hash-progress": CoverHashProgress;
   "window-maximized": boolean;
   "download-progress": DownloadProgressEvent;
   "update-status": UpdateStatusEvent;

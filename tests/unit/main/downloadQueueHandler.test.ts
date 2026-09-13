@@ -35,8 +35,14 @@ vi.mock("../../../src/main/handlers/downloaderHandler.js", () => ({
   handleDownloadGallery: (...args: unknown[]) => downloadGallery(...args),
 }));
 
-vi.mock("node-hitomi", () => ({
-  default: { getGallery: vi.fn(() => Promise.resolve(null)) },
+// 갤러리 조회는 큐의 상태 전이와 무관하다. 네트워크만 막아둔다.
+// 조회 실패는 파일 삭제 경로에서 잡히고 큐 삭제는 그대로 진행된다.
+vi.mock("../../../src/main/services/hitomi/client.js", () => ({
+  hitomi: {
+    galleries: {
+      retrieve: vi.fn(() => Promise.reject(new Error("네트워크 차단(테스트)"))),
+    },
+  },
 }));
 
 const dbRef: { current: Knex | null } = { current: null };
@@ -61,6 +67,8 @@ let db: Knex;
 
 const addItem = (galleryId: number, overrides: Record<string, unknown> = {}) =>
   db("DownloadQueue").insert({
+    source: "hitomi",
+    source_key: String(galleryId),
     gallery_id: galleryId,
     gallery_title: `갤러리 ${galleryId}`,
     download_path: "C:\\down",
@@ -118,6 +126,19 @@ describe("handleAddToDownloadQueue", () => {
     expect(await db("DownloadQueue").count("* as c").first()).toMatchObject({
       c: 1,
     });
+  });
+
+  it("galleryId를 그대로 source_key로 적는다", async () => {
+    const result = await handleAddToDownloadQueue({
+      galleryId: 3241234,
+      galleryTitle: "[작가] 제목",
+      downloadPath: "C:\\down",
+    });
+
+    expect(result.success).toBe(true);
+    const row = await db("DownloadQueue").where("gallery_id", 3241234).first();
+    expect(row.source).toBe("hitomi");
+    expect(row.source_key).toBe("3241234");
   });
 });
 

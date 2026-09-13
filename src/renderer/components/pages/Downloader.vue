@@ -50,6 +50,8 @@ import {
 import {
   chunksForRange,
   computeListCols,
+  LIST_GAP,
+  MIN_LIST_CARD_WIDTH,
   shouldShowSkeleton,
 } from "@/lib/virtualList";
 import { listRowEstimate } from "@/lib/cardLayout";
@@ -61,7 +63,7 @@ import { Icon } from "@iconify/vue";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import { useThrottleFn } from "@vueuse/core";
-import type { Gallery } from "node-hitomi";
+import type { GalleryDto } from "@/../types/ipc";
 import { AcceptableValue } from "reka-ui";
 import {
   computed,
@@ -151,7 +153,7 @@ const blacklistTags = ref<string[]>([]);
 
 // 미리보기 다이얼로그 관련 상태
 const isPreviewDialogOpen = ref(false);
-const selectedGallery = ref<Gallery>();
+const selectedGallery = ref<GalleryDto>();
 
 /** 현재 보고 있는 PAGE 단위 구간 (0-based). offset·shownCount는 여기서 유도된다 */
 const currentPage = ref(0);
@@ -323,7 +325,7 @@ const chunkQueries = useQueries({
           ),
         )) as {
           success: boolean;
-          data: Gallery & { thumbnailUrl: string };
+          data: GalleryDto;
         }[];
 
         const galleries = detailResults
@@ -352,7 +354,7 @@ const chunkQueries = useQueries({
  * 들고 있는 게 결과 전체가 아니라 드문드문한 몇 개 청크뿐이라 Map을 쓴다.
  */
 const galleryByIndex = computed(() => {
-  const map = new Map<number, Gallery & { thumbnailUrl: string }>();
+  const map = new Map<number, GalleryDto>();
   for (const query of chunkQueries.value) {
     const data = query.data;
     if (!data) continue;
@@ -436,7 +438,7 @@ const resolveBookId = (galleryId: number): number | null => {
   return bookExistsMap.value?.[galleryId] ?? null;
 };
 
-const handleSelectGallery = (gallery: Gallery) => {
+const handleSelectGallery = (gallery: GalleryDto) => {
   selectedGallery.value = gallery;
 };
 
@@ -480,11 +482,7 @@ const loadDownloaderConfig = async () => {
   }
   if (config.downloaderPopularity !== undefined) {
     downloaderPopularity.value = config.downloaderPopularity as
-      | ""
-      | "day"
-      | "week"
-      | "month"
-      | "year";
+      "" | "day" | "week" | "month" | "year";
   }
 
   const next = (config.downloaderBlacklistTags as string[]) || [];
@@ -606,6 +604,8 @@ const syncQueueToStatuses = () => {
     if (queueItem.status === "downloading") {
       mappedStatus = "progress";
     }
+
+    if (queueItem.gallery_id === null) return;
 
     downloadStatuses[queueItem.gallery_id] = {
       status: mappedStatus,
@@ -746,14 +746,6 @@ const gridMetrics = computed(() =>
     MIN_CARD_WIDTH,
   ),
 );
-
-const LIST_GAP = 8; // 리스트 카드 사이 간격 (gap-2, pb-2와 맞춘다)
-
-/**
- * 리스트 카드 하나의 최소 폭 (줌 1.0 기준). 이보다 좁아지면 2열로 아낀 세로
- * 공간을 태그 줄바꿈으로 도로 뱉는다.
- */
-const MIN_LIST_CARD_WIDTH = 560;
 
 const listCols = computed(() =>
   computeListCols(
@@ -1038,11 +1030,7 @@ const handlePopularityChange = async (value: AcceptableValue) => {
   if (value === undefined || value === null) return;
   // 센티넬을 저장·조회용 빈 문자열로 되돌립니다
   const next = (value === POPULARITY_ALL ? "" : value) as
-    | ""
-    | "day"
-    | "week"
-    | "month"
-    | "year";
+    "" | "day" | "week" | "month" | "year";
   downloaderPopularity.value = next;
   await ipcRenderer.invoke("set-config", {
     key: "downloaderPopularity",
@@ -1456,11 +1444,11 @@ useSearchPersistence(searchQuery, "downloader-search-query");
 
     <!-- 결과 -->
     <!-- scrollbar-gutter: 총 높이가 0→수백만으로 뛰며 스크롤바가 생기는 순간
-         clientWidth가 15px 줄어듭니다. 컬럼 경계 근처면
-         cols→rowH→총높이→스크롤바 순환이 발생합니다 -->
+       clientWidth가 15px 줄어듭니다. 컬럼 경계 근처면
+       cols→rowH→총높이→스크롤바 순환이 발생합니다 -->
     <div
       ref="scrollerRef"
-      class="downloader-scroller relative min-h-0 flex-1 overflow-y-auto rounded-lg border p-2 [scrollbar-gutter:stable]"
+      class="downloader-scroller relative min-h-0 flex-1 [scrollbar-gutter:stable] overflow-y-auto rounded-lg border p-2"
       @scroll="scheduleVisibleRangeUpdate"
     >
       <!-- 로딩: 스켈레톤 -->
@@ -1508,7 +1496,7 @@ useSearchPersistence(searchQuery, "downloader-search-query");
 
       <!-- 결과 목록 (가상 스크롤) -->
       <!-- .vspace는 zoom 바깥, 카드만 .zoomed-grid 안. 스페이서를 zoom
-           안으로 옮기면 렌더 높이가 총높이 × z가 되어 뒤쪽에 도달할 수 없습니다 -->
+         안으로 옮기면 렌더 높이가 총높이 × z가 되어 뒤쪽에 도달할 수 없습니다 -->
       <div
         v-else-if="shownCount > 0"
         class="vspace relative w-full"
@@ -1572,8 +1560,8 @@ useSearchPersistence(searchQuery, "downloader-search-query");
         </div>
 
         <!-- 리스트: 행 단위 가상화 + 동적 측정 (CSS zoom 없음).
-             측정 대상은 행 래퍼다. 2열이면 두 카드 중 높은 쪽이 행 높이가 되는데
-             래퍼 하나만 재면 저절로 맞는다 -->
+           측정 대상은 행 래퍼다. 2열이면 두 카드 중 높은 쪽이 행 높이가 되는데
+           래퍼 하나만 재면 저절로 맞는다 -->
         <div v-else class="absolute inset-x-0 top-0" @wheel="handleZoomWheel">
           <div
             v-for="virtualRow in listVirtualizer?.getVirtualItems() ?? []"

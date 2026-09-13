@@ -3,16 +3,23 @@ import fs from "fs/promises";
 import type { Knex } from "knex";
 import path from "path";
 import * as yauzl from "yauzl";
-import type { Book, FilterParams } from "../../types/ipc.js";
+import type { Book, FilterParams, ReadStatus } from "../../types/ipc.js";
 import db from "../db/index.js";
 import { console } from "../main.js";
 import { broadcast } from "../utils/broadcast.js";
 import { naturalSort } from "../utils/index.js";
 import { store as configStore } from "./configHandler.js";
 
+/** `id:>3000000` 같은 히토미 ID 범위 조건. 양끝은 포함이다 */
+export interface IdRange {
+  min?: number;
+  max?: number;
+}
+
 export interface ExcludeTerms {
   titleTerms: string[];
   idTerms: string[];
+  idRanges: IdRange[];
   artistTerms: string[];
   tagTerms: string[];
   seriesTerms: string[];
@@ -35,11 +42,39 @@ const PREFIXED_TERM_REGEX =
  */
 const isNumericTerm = (term: string): boolean => /^\d+$/.test(term);
 
+/** `>3000000` `<=3200000` `3000000-3200000` `3000000~3200000` */
+const ID_RANGE_REGEX = /^(?:(>=?|<=?)(\d+)|(\d+)\s*[-~]\s*(\d+))$/;
+
+/**
+ * `id:` 뒤가 범위 표현이면 범위로, 아니면 null(= 기존대로 정확히 일치).
+ * 시작이 끝보다 크게 적힌 경우는 뒤집어 받는다.
+ */
+const parseIdRange = (value: string): IdRange | null => {
+  const match = ID_RANGE_REGEX.exec(value.replace(/\s+/g, ""));
+  if (!match) return null;
+
+  const [, operator, operand, from, to] = match;
+
+  // ID는 정수라 초과·미만은 경계를 한 칸 밀어 포함 범위로 바꿔 둔다
+  if (operator) {
+    const bound = Number(operand);
+    if (operator === ">") return { min: bound + 1 };
+    if (operator === ">=") return { min: bound };
+    if (operator === "<") return { max: bound - 1 };
+    return { max: bound };
+  }
+
+  const start = Number(from);
+  const end = Number(to);
+  return start <= end ? { min: start, max: end } : { min: end, max: start };
+};
+
 // 검색어 문자열을 프리픽스별로 분류하여 반환
 export function parseSearchQuery(searchQuery: string): ParsedSearchTerms {
   const result: ParsedSearchTerms = {
     titleTerms: [],
     idTerms: [],
+    idRanges: [],
     artistTerms: [],
     tagTerms: [],
     seriesTerms: [],
@@ -50,6 +85,7 @@ export function parseSearchQuery(searchQuery: string): ParsedSearchTerms {
     exclude: {
       titleTerms: [],
       idTerms: [],
+      idRanges: [],
       artistTerms: [],
       tagTerms: [],
       seriesTerms: [],
@@ -80,9 +116,15 @@ export function parseSearchQuery(searchQuery: string): ParsedSearchTerms {
 
     const target = isNegated ? result.exclude : result;
     switch (prefix) {
-      case "id":
-        target.idTerms.push(value);
+      case "id": {
+        const range = parseIdRange(value);
+        if (range) {
+          target.idRanges.push(range);
+        } else {
+          target.idTerms.push(value);
+        }
         break;
+      }
       case "artist":
         target.artistTerms.push(value);
         break;
@@ -240,15 +282,40 @@ export async function mapBooksToResponse<T extends MappableBookRow>(
  * @param withArtists `sub.artists`(작가명 집계)를 정렬·커서 비교에 쓸 때만 true.
  *   작가 조인만 붙이므로 나머지 8개 조인과 집계 4개는 그대로 빠진다.
  */
+/**
+ * 완독 판정. 읽는 중·안 읽음은 이 조건의 부정 위에 세워지므로, 세 구간은
+ * 정의상 서로 겹치지 않고 전체를 덮는다.
+ *
+ * COALESCE로 NULL을 먼저 0으로 눌러두는 것이 핵심이다. NULL이 남으면 `NOT`의
+ * 결과가 참도 거짓도 아닌 NULL이 되어, page_count를 모르는 책이 세 구간
+ * 어디에도 잡히지 않고 사라진다. page_count가 0이거나 NULL이면 끝을 알 수 없어
+ * 완독이 될 수 없고, 그런 책은 읽은 만큼에 따라 안 읽음이나 읽는 중으로 간다.
+ */
+const COMPLETED_CONDITION =
+  "(COALESCE(sub.page_count, 0) > 0 AND COALESCE(sub.current_page, 0) >= sub.page_count)";
+
+/**
+ * 읽음 상태 구간별 조건.
+ *
+ * `last_read_at`이 아니라 `current_page`로 가른다. 책을 열기만 해도
+ * `last_read_at`은 채워지므로, 그 기준으로는 1페이지에서 멈춘 책까지 읽은 책이
+ * 되어버린다. 세 구간은 통계 화면의 분류와 같은 기준이며 겹치지도 빠지지도 않는다.
+ */
+const READ_STATUS_CONDITIONS: Record<ReadStatus, string> = {
+  completed: COMPLETED_CONDITION,
+  reading: `(COALESCE(sub.current_page, 0) > 1 AND NOT ${COMPLETED_CONDITION})`,
+  unread: `(COALESCE(sub.current_page, 0) <= 1 AND NOT ${COMPLETED_CONDITION})`,
+};
+
 function buildFilteredQuery(
   filter: FilterParams | null,
   { withArtists = false }: { withArtists?: boolean } = {},
 ) {
   const {
     searchQuery = "",
-    readStatus = "all",
+    readStatus = [],
     isFavorite = false,
-    libraryPath = "",
+    libraryPath = [],
     offlineStatus = "all",
   } = filter || {};
 
@@ -267,14 +334,20 @@ function buildFilteredQuery(
       )
     : db("Book as sub");
 
-  if (libraryPath && libraryPath !== "all") {
-    mainQuery.where("sub.path", "like", `${libraryPath}%`);
+  // 폴더를 여러 개 고르면 그중 하나에만 속해도 나온다
+  if (libraryPath.length > 0) {
+    mainQuery.where((builder) => {
+      for (const path of libraryPath) {
+        builder.orWhere("sub.path", "like", `${path}%`);
+      }
+    });
   }
 
   if (searchQuery) {
     const {
       titleTerms,
       idTerms,
+      idRanges,
       artistTerms,
       tagTerms,
       seriesTerms,
@@ -287,6 +360,16 @@ function buildFilteredQuery(
 
     if (idTerms.length > 0) {
       mainQuery.whereIn("sub.hitomi_id", idTerms);
+    }
+    // hitomi_id는 문자열 컬럼이라 정렬과 마찬가지로 숫자로 바꿔 비교한다.
+    // ID가 없는 책은 CAST 결과가 NULL이라 자연히 빠진다
+    for (const range of idRanges) {
+      if (range.min !== undefined) {
+        mainQuery.whereRaw("CAST(sub.hitomi_id AS INTEGER) >= ?", [range.min]);
+      }
+      if (range.max !== undefined) {
+        mainQuery.whereRaw("CAST(sub.hitomi_id AS INTEGER) <= ?", [range.max]);
+      }
     }
     if (artistTerms.length > 0) {
       for (const artist of artistTerms) {
@@ -375,6 +458,23 @@ function buildFilteredQuery(
     if (exclude.idTerms.length > 0) {
       mainQuery.whereNotIn("sub.hitomi_id", exclude.idTerms);
     }
+    // 범위를 빼는 조건이 ID 없는 책까지 지우면 안 되므로 NULL을 따로 살린다
+    for (const range of exclude.idRanges) {
+      const conditions: string[] = [];
+      const bindings: number[] = [];
+      if (range.min !== undefined) {
+        conditions.push("CAST(sub.hitomi_id AS INTEGER) >= ?");
+        bindings.push(range.min);
+      }
+      if (range.max !== undefined) {
+        conditions.push("CAST(sub.hitomi_id AS INTEGER) <= ?");
+        bindings.push(range.max);
+      }
+      mainQuery.whereRaw(
+        `(NOT (${conditions.join(" AND ")}) OR sub.hitomi_id IS NULL)`,
+        bindings,
+      );
+    }
     if (exclude.artistTerms.length > 0) {
       for (const artist of exclude.artistTerms) {
         mainQuery.whereNotExists(function () {
@@ -455,10 +555,12 @@ function buildFilteredQuery(
     }
   }
 
-  if (readStatus === "read") {
-    mainQuery.whereNotNull("sub.last_read_at");
-  } else if (readStatus === "unread") {
-    mainQuery.whereNull("sub.last_read_at");
+  // 여러 구간을 고르면 합집합이 된다. 세 개를 다 고르면 조건이 없는 것과 같다
+  const readStatusConditions = readStatus
+    .map((status) => READ_STATUS_CONDITIONS[status])
+    .filter(Boolean);
+  if (readStatusConditions.length > 0) {
+    mainQuery.whereRaw(`(${readStatusConditions.join(" OR ")})`);
   }
 
   if (isFavorite) {
@@ -505,6 +607,7 @@ export const SORTABLE_COLUMNS = [
   "artists",
   "page_count",
   "hitomi_id",
+  "rating",
   "random",
 ] as const;
 
@@ -1266,6 +1369,29 @@ export const handleToggleBookFavorite = async ({
   }
 };
 
+/** 별점은 0(미평가)~5 정수만 저장한다. 그 밖의 값은 렌더러 버그로 보고 잘라낸다 */
+export const clampRating = (value: unknown): number => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.min(5, Math.max(0, Math.round(value)));
+};
+
+export const handleSetBookRating = async ({
+  bookId,
+  rating,
+}: {
+  bookId: number;
+  rating: number;
+}) => {
+  try {
+    const next = clampRating(rating);
+    await db("Book").where("id", bookId).update({ rating: next });
+    return { success: true, rating: next };
+  } catch (error) {
+    console.error(`Failed to set rating for book ${bookId}:`, error);
+    return { success: false, error };
+  }
+};
+
 export const handleOpenBookFolder = async (bookPath: string) => {
   try {
     // shell.showItemInFolder는 파일 관리자에서 해당 항목을 보여줍니다.
@@ -1595,6 +1721,9 @@ export function registerBookHandlers() {
   );
   ipcMain.handle("toggle-book-favorite", (_event, params) =>
     handleToggleBookFavorite(params),
+  );
+  ipcMain.handle("set-book-rating", (_event, params) =>
+    handleSetBookRating(params),
   );
   ipcMain.handle("open-book-folder", (_event, bookPath) =>
     handleOpenBookFolder(bookPath),

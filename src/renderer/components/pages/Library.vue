@@ -17,14 +17,22 @@ import { useBookDelete } from "@/composables/useBookDelete";
 import {
   activeFilters,
   libraryPathLabel,
+  normalizeReadStatus,
+  parseFilterChipKey,
+  parseLibraryPaths,
+  parseReadStatuses,
+  toggleFilterValue,
   LIBRARY_FILTER_DEFAULTS,
+  READ_STATUS_OPTIONS,
   type LibraryFilterState,
 } from "@/lib/libraryFilters";
 import { toggleSearchTerm } from "@/lib/searchQuery";
+import { nextFocusIndex, type FocusDirection } from "@/lib/gridNavigation";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuLabel,
+  DropdownMenuCheckboxItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
@@ -50,6 +58,7 @@ import {
   ref,
   toRaw,
   watch,
+  type Ref,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
@@ -59,6 +68,7 @@ import {
   getPresets,
   ipcRenderer,
   openBookFolder,
+  openNewWindow,
   toggleBookFavorite,
 } from "../../api";
 import AppliedFilterChips from "../common/AppliedFilterChips.vue";
@@ -88,9 +98,7 @@ const previewBook = ref<Book | null>(null);
 
 // Filter and Sort State
 const libraryPath = ref((route.query.libraryPath as string) || "all");
-const readStatus = ref<"all" | "read" | "unread">(
-  (route.query.readStatus as "all" | "read" | "unread") || "all",
-);
+const readStatus = ref(normalizeReadStatus(route.query.readStatus));
 const isFavorite = ref((route.query.isFavorite as string) || "all");
 const offlineStatus = ref<"all" | "online" | "offline">(
   (route.query.offlineStatus as "all" | "online" | "offline") || "all",
@@ -123,6 +131,17 @@ const { schWord: searchQuery } = useQueryAndParams({
   resetOnEmptyQuery: false,
 });
 
+const selectedLibraryPaths = computed(() =>
+  parseLibraryPaths(libraryPath.value),
+);
+const selectedReadStatuses = computed(() =>
+  parseReadStatuses(readStatus.value),
+);
+
+// 항목 하나를 누를 때마다 메뉴가 닫히면 조건을 이어서 손볼 수 없다.
+// 라디오 항목도 값 변경은 select 이벤트와 무관하게 일어나므로 안전하다
+const keepMenuOpen = (event: Event) => event.preventDefault();
+
 // 지금 걸려 있는 검색·필터. 왜 눈에 보여야 하는지는 lib/libraryFilters.ts 참고
 const appliedFilters = computed(() =>
   activeFilters({
@@ -143,16 +162,28 @@ const filterResetters: Record<keyof LibraryFilterState, () => void> = {
     (offlineStatus.value = LIBRARY_FILTER_DEFAULTS.offlineStatus),
 };
 
-// 칩 하나만 해제
-const clearFilter = (key: keyof LibraryFilterState) => filterResetters[key]();
+/** 값을 여러 개 고를 수 있는 필터 */
+const multiValueFilters: Partial<
+  Record<keyof LibraryFilterState, Ref<string>>
+> = {
+  libraryPath,
+  readStatus,
+};
 
 // 걸려 있는 조건 전부 해제
 const clearAllFilters = () =>
   Object.values(filterResetters).forEach((resetOne) => resetOne());
 
-// 칩 컴포넌트는 키를 문자열로 넘긴다. 라이브러리 필터 키로 좁혀서 받는다
-const clearFilterByKey = (key: string) =>
-  clearFilter(key as keyof LibraryFilterState);
+// 칩 하나만 해제. 여러 값을 고를 수 있는 필터는 누른 값만 빠진다
+const clearFilterByKey = (key: string) => {
+  const { field, value } = parseFilterChipKey(key);
+  const target = multiValueFilters[field];
+  if (target && value !== undefined) {
+    target.value = toggleFilterValue(target.value, value);
+    return;
+  }
+  filterResetters[field]();
+};
 
 // 검색어 debounce 적용 (API 호출 최적화)
 const debouncedSearchQuery = debouncedRef(searchQuery, 300);
@@ -176,7 +207,7 @@ const loadSettings = () => {
     const settings = config.value.libraryViewSettings as {
       sortBy: string;
       sortOrder: "asc" | "desc";
-      readStatus: "all" | "read" | "unread";
+      readStatus: string;
       viewMode: "grid" | "list";
       searchQuery?: string;
       libraryPath?: string;
@@ -193,7 +224,7 @@ const loadSettings = () => {
       sortOrder.value = settings.sortOrder;
     }
     if (!query.readStatus) {
-      readStatus.value = settings.readStatus;
+      readStatus.value = normalizeReadStatus(settings.readStatus);
     }
     // 검색어와 나머지 필터도 복원한다. 구버전 설정에는 없는 값이라 기본값으로 대체
     if (!query.schWord) {
@@ -233,10 +264,18 @@ watch(
   { immediate: true },
 );
 
+/**
+ * 화면에 떠 있는지. keep-alive라 다른 페이지로 가도 이 컴포넌트는 살아 있고
+ * 단축키 리스너도 그대로 남는다. 방향키를 그때도 잡으면 설정·통계 화면의
+ * 스크롤이 막히므로 단축키 전체를 이 값으로 묶는다.
+ */
+const isPageActive = ref(true);
+
 // 다른 페이지로 이동할 때 설정 저장 방지
 onDeactivated(() => {
   // 다른 페이지로 이동 시 설정 저장 방지
   isSettingsInitialized.value = false;
+  isPageActive.value = false;
 });
 
 // keep-alive로 돌아왔을 때는 설정을 다시 읽지 않는다.
@@ -247,6 +286,7 @@ onDeactivated(() => {
 // 되돌아간다. 예전에는 쿼리 없는 주소로 돌아올 때마다 상태가 초기화됐기 때문에
 // 여기서 다시 불러오는 게 필요했지만, 이제는 초기화하지 않으므로 불필요하다.
 onActivated(() => {
+  isPageActive.value = true;
   if (isConfigLoaded.value) {
     isSettingsInitialized.value = true;
   }
@@ -307,8 +347,8 @@ const queryKey = computed(
       "books",
       {
         searchQuery: debouncedSearchQuery.value,
-        libraryPath: libraryPath.value,
-        readStatus: readStatus.value,
+        libraryPath: selectedLibraryPaths.value,
+        readStatus: selectedReadStatuses.value,
         offlineStatus: offlineStatus.value,
         sortBy: sortBy.value,
         sortOrder: sortOrder.value,
@@ -365,6 +405,96 @@ const {
   chunkKey: (chunkIndex) => ["books", queryKey.value[1], chunkIndex],
   // 필터가 바뀌면 새 키의 청크를 받아 다시 그려야 하므로 스켈레톤 상태로 돌린다
   resetKey: () => queryKey.value[1],
+});
+
+// ===== 키보드 카드 선택 =====
+
+/**
+ * 선택된 카드의 전체 목록 기준 인덱스. -1이면 선택 없음.
+ *
+ * 뷰 모드와 무관한 절대 순번이라 그리드↔리스트를 오가도 같은 책을 가리킨다.
+ * 열 수만 그때그때 다시 읽으면 된다.
+ */
+const focusedIndex = ref(-1);
+
+const activeCols = computed(() =>
+  viewMode.value === "grid" ? gridCols.value : listCols.value,
+);
+
+const activeVirtualizer = computed(() =>
+  viewMode.value === "grid" ? gridVirtualizer.value : listVirtualizer.value,
+);
+
+const focusedBook = computed(() =>
+  focusedIndex.value < 0 ? undefined : itemAt(focusedIndex.value),
+);
+
+const scrollFocusedIntoView = () => {
+  if (focusedIndex.value < 0) return;
+  const lanes = Math.max(1, activeCols.value);
+  activeVirtualizer.value?.scrollToIndex(
+    Math.floor(focusedIndex.value / lanes),
+    { align: "auto" },
+  );
+};
+
+const moveFocus = (direction: FocusDirection) => {
+  if (totalCount.value === 0) return;
+
+  if (focusedIndex.value < 0) {
+    // 첫 방향키는 화면에 보이는 맨 윗줄을 잡는다. 0번으로 보내면 스크롤이 튄다
+    const rows = activeVirtualizer.value?.getVirtualItems() ?? [];
+    const firstVisible =
+      rows.length > 0 ? rows[0].index * Math.max(1, activeCols.value) : 0;
+    focusedIndex.value = Math.min(firstVisible, totalCount.value - 1);
+  } else {
+    focusedIndex.value = nextFocusIndex(
+      focusedIndex.value,
+      direction,
+      activeCols.value,
+      totalCount.value,
+    );
+  }
+  scrollFocusedIntoView();
+};
+
+/** 아직 청크가 안 온 자리면 열지 않고 키를 흘려보낸다 */
+const openFocused = (newWindow = false) => {
+  const book = focusedBook.value;
+  if (!book) return false;
+
+  if (book.is_offline) {
+    toast.warning("라이브러리 폴더에 접근할 수 없습니다.", {
+      description: "해당 폴더에 접근할 수 있는지 확인한 후 다시 스캔해 주세요.",
+    });
+    return;
+  }
+
+  const filter = JSON.stringify(toRaw(queryKey.value[1]));
+  if (newWindow) {
+    openNewWindow(
+      `/viewer/${book.id}?${new URLSearchParams({ filter }).toString()}`,
+    );
+  } else {
+    router.push({ name: "Viewer", params: { id: book.id }, query: { filter } });
+  }
+};
+
+/** 해제할 선택이 없으면 false를 돌려 레이아웃의 창 최소화로 넘긴다 */
+const clearFocus = () => {
+  if (focusedIndex.value < 0) return false;
+  focusedIndex.value = -1;
+};
+
+/** 카드 밖(여백·목록 아래 빈 공간)을 누르면 선택을 푼다 */
+const handleScrollerClick = (event: MouseEvent) => {
+  if ((event.target as HTMLElement).closest("[data-book-card]")) return;
+  focusedIndex.value = -1;
+};
+
+// 검색·정렬이 바뀌면 순서가 달라져 같은 인덱스가 다른 책을 가리킨다
+watch(queryKey, () => {
+  focusedIndex.value = -1;
 });
 
 // 프리픽스 무효화라 마운트된 청크만 즉시 다시 받고 나머지는 stale 표시만 된다.
@@ -438,20 +568,16 @@ const toggleFavoriteFilter = () => {
   toast.info(isFavorite.value === "favorite" ? "즐겨찾기만 표시" : "전체 표시");
 };
 
-// 읽음 상태 순환 (모두 → 읽음 → 안읽음)
+// 읽음 상태 순환 (모두 → 안읽음 → 읽는중 → 완독)
 const cycleReadStatus = () => {
-  const cycle: Record<string, "all" | "read" | "unread"> = {
-    all: "read",
-    read: "unread",
-    unread: "all",
-  };
-  const labels: Record<string, string> = {
-    all: "모두",
-    read: "읽음",
-    unread: "안읽음",
-  };
-  readStatus.value = cycle[readStatus.value] || "all";
-  toast.info(`읽음 상태: ${labels[readStatus.value]}`);
+  const values = READ_STATUS_OPTIONS.map((option) => option.value);
+  const current = selectedReadStatuses.value[0];
+  const next = values[current ? values.indexOf(current) + 1 : 0];
+
+  readStatus.value = next ?? LIBRARY_FILTER_DEFAULTS.readStatus;
+  toast.info(
+    `읽음 상태: ${READ_STATUS_OPTIONS.find((o) => o.value === next)?.label ?? "모두"}`,
+  );
 };
 
 // 프리셋 순환
@@ -472,19 +598,17 @@ const cycleLibrary = (direction: 1 | -1) => {
   const dirs = libraryDirectories.value;
   if (dirs.length === 0) return;
 
-  // 현재 선택된 라이브러리의 인덱스 찾기
-  const currentIndex =
-    libraryPath.value === "all" ? -1 : dirs.indexOf(libraryPath.value);
+  // 여러 개를 골라둔 상태에서는 첫 번째를 기준으로 삼고, 순환 결과는 하나만 남긴다
+  const currentIndex = dirs.indexOf(selectedLibraryPaths.value[0]);
   // 순환: all(-1) → 0 → 1 → ... → N-1 → all(-1)
   const totalOptions = dirs.length + 1; // all + 각 폴더
   const currentSlot = currentIndex === -1 ? 0 : currentIndex + 1;
   const nextSlot = (currentSlot + direction + totalOptions) % totalOptions;
 
-  libraryPath.value = nextSlot === 0 ? "all" : dirs[nextSlot - 1];
+  libraryPath.value =
+    nextSlot === 0 ? LIBRARY_FILTER_DEFAULTS.libraryPath : dirs[nextSlot - 1];
   toast.info(
-    libraryPath.value === "all"
-      ? "모든 라이브러리"
-      : libraryPathLabel(libraryPath.value),
+    nextSlot === 0 ? "모든 라이브러리" : libraryPathLabel(libraryPath.value),
   );
 };
 
@@ -551,23 +675,35 @@ const handleShowPreview = (book: Book) => {
 };
 
 // 라이브러리 단축키 등록
-useKeybindings("library", {
-  "library:search-focus": () => {
-    searchInputRef.value?.focus();
+useKeybindings(
+  "library",
+  {
+    "library:search-focus": () => {
+      searchInputRef.value?.focus();
+      focusedIndex.value = -1;
+    },
+    "library:focus-left": () => moveFocus("left"),
+    "library:focus-right": () => moveFocus("right"),
+    "library:focus-up": () => moveFocus("up"),
+    "library:focus-down": () => moveFocus("down"),
+    "library:open-focused": () => openFocused(),
+    "library:open-focused-new-window": () => openFocused(true),
+    "library:clear-focus": clearFocus,
+    "library:cycle-sort": cycleSortBy,
+    "library:sort-order-toggle": () => {
+      toggleSortOrder();
+    },
+    "library:quit-app": () => {
+      ipcRenderer.send("close-window");
+    },
+    "library:toggle-favorite": toggleFavoriteFilter,
+    "library:cycle-read-status": cycleReadStatus,
+    "library:cycle-preset": cyclePreset,
+    "library:prev-library": () => cycleLibrary(-1),
+    "library:next-library": () => cycleLibrary(1),
   },
-  "library:cycle-sort": cycleSortBy,
-  "library:sort-order-toggle": () => {
-    toggleSortOrder();
-  },
-  "library:quit-app": () => {
-    ipcRenderer.send("close-window");
-  },
-  "library:toggle-favorite": toggleFavoriteFilter,
-  "library:cycle-read-status": cycleReadStatus,
-  "library:cycle-preset": cyclePreset,
-  "library:prev-library": () => cycleLibrary(-1),
-  "library:next-library": () => cycleLibrary(1),
-});
+  { enabled: () => isPageActive.value },
+);
 
 // 삭제 다이얼로그는 페이지가 하나만 들고 있는다. 카드가 각자 들고 있으면
 // 다이얼로그를 연 채 스크롤해 카드가 언마운트될 때 같이 사라진다.
@@ -612,10 +748,19 @@ const {
                 <li><kbd>D</kbd>: 정렬 기준 순환</li>
                 <li><kbd>S</kbd>: 정렬 순서 전환 (오름차순/내림차순)</li>
                 <li><kbd>F</kbd>: 즐겨찾기 필터 토글</li>
-                <li><kbd>R</kbd>: 읽음 상태 순환 (모두→읽음→안읽음)</li>
+                <li><kbd>R</kbd>: 읽음 상태 순환 (모두→안읽음→읽는중→완독)</li>
                 <li><kbd>P</kbd>: 프리셋 순환</li>
                 <li><kbd>[</kbd> / <kbd>]</kbd>: 이전/다음 라이브러리 폴더</li>
                 <li><kbd>Ctrl</kbd>+<kbd>Wheel</kbd>: 썸네일 밀도 조절</li>
+                <li>
+                  <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd>: 책 선택
+                  이동
+                </li>
+                <li><kbd>Enter</kbd>: 선택한 책 열기</li>
+                <li>
+                  <kbd>Ctrl</kbd>+<kbd>Enter</kbd>: 선택한 책 새 창으로 열기
+                </li>
+                <li><kbd>Esc</kbd>: 선택 해제 (선택이 없으면 창 최소화)</li>
               </ul>
               <h3 class="text-foreground text-base font-semibold">검색 팁</h3>
               <ul class="list-inside list-disc">
@@ -630,6 +775,14 @@ const {
                 <li><code>tag:태그명</code>: 특정 태그로 검색합니다.</li>
                 <li><code>artist:작가명</code>: 특정 작가로 검색합니다.</li>
                 <li><code>series:시리즈명</code>: 특정 시리즈로 검색합니다.</li>
+                <li><code>id:123456</code>: 히토미 ID로 검색합니다.</li>
+                <li>
+                  <code>id:&gt;3000000</code>, <code>id:3000000-3200000</code>:
+                  히토미 ID 범위로 검색합니다. <code>&gt;</code>
+                  <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code>와 구간
+                  표기를 쓸 수 있으며, 랜덤 정렬에서 오래된 작품을 걸러낼 때
+                  유용합니다.
+                </li>
                 <li>여러 검색어를 공백으로 구분하여 조합할 수 있습니다.</li>
                 <li>
                   <Icon
@@ -745,46 +898,71 @@ const {
             <DropdownMenuContent class="w-64">
               <!-- 폴더도 책을 감추는 조건이라 다른 필터와 같은 자리에 둔다 -->
               <DropdownMenuLabel>라이브러리 폴더</DropdownMenuLabel>
-              <DropdownMenuRadioGroup v-model="libraryPath">
-                <DropdownMenuRadioItem value="all">
-                  모든 라이브러리
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem
-                  v-for="dir in libraryDirectories"
-                  :key="dir"
-                  :value="dir"
-                  class="truncate"
-                >
-                  <span class="truncate" :title="dir">{{ dir }}</span>
-                </DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
+              <DropdownMenuCheckboxItem
+                :model-value="selectedLibraryPaths.length === 0"
+                @select="keepMenuOpen"
+                @update:model-value="
+                  libraryPath = LIBRARY_FILTER_DEFAULTS.libraryPath
+                "
+              >
+                모든 라이브러리
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                v-for="dir in libraryDirectories"
+                :key="dir"
+                :model-value="selectedLibraryPaths.includes(dir)"
+                class="truncate"
+                @select="keepMenuOpen"
+                @update:model-value="
+                  libraryPath = toggleFilterValue(libraryPath, dir)
+                "
+              >
+                <span class="truncate" :title="dir">{{ dir }}</span>
+              </DropdownMenuCheckboxItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>읽음 상태</DropdownMenuLabel>
-              <DropdownMenuRadioGroup v-model="readStatus">
-                <DropdownMenuRadioItem value="all">모두</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="read">읽음</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="unread"
-                  >안 읽음</DropdownMenuRadioItem
-                >
-              </DropdownMenuRadioGroup>
+              <DropdownMenuCheckboxItem
+                :model-value="selectedReadStatuses.length === 0"
+                @select="keepMenuOpen"
+                @update:model-value="
+                  readStatus = LIBRARY_FILTER_DEFAULTS.readStatus
+                "
+              >
+                모두
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                v-for="option in READ_STATUS_OPTIONS"
+                :key="option.value"
+                :model-value="selectedReadStatuses.includes(option.value)"
+                @select="keepMenuOpen"
+                @update:model-value="
+                  readStatus = toggleFilterValue(readStatus, option.value)
+                "
+              >
+                {{ option.label }}
+              </DropdownMenuCheckboxItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>즐겨찾기</DropdownMenuLabel>
               <DropdownMenuRadioGroup v-model="isFavorite">
-                <DropdownMenuRadioItem value="all">모두</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="favorite"
-                  >즐겨찾기만</DropdownMenuRadioItem
-                >
+                <DropdownMenuRadioItem value="all" @select="keepMenuOpen">
+                  모두
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="favorite" @select="keepMenuOpen">
+                  즐겨찾기만
+                </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>오프라인 상태</DropdownMenuLabel>
               <DropdownMenuRadioGroup v-model="offlineStatus">
-                <DropdownMenuRadioItem value="all">모두</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="online"
-                  >온라인만</DropdownMenuRadioItem
-                >
-                <DropdownMenuRadioItem value="offline"
-                  >오프라인만</DropdownMenuRadioItem
-                >
+                <DropdownMenuRadioItem value="all" @select="keepMenuOpen">
+                  모두
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="online" @select="keepMenuOpen">
+                  온라인만
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="offline" @select="keepMenuOpen">
+                  오프라인만
+                </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -851,6 +1029,7 @@ const {
         class="library-scroller relative min-h-0 flex-grow overflow-y-auto"
         @wheel="handleZoomWheel"
         @scroll="updateVisibleRange"
+        @click="handleScrollerClick"
       >
         <div
           v-if="isLoading"
@@ -892,6 +1071,9 @@ const {
                     v-if="itemAt(row.index * gridCols + col - 1)"
                     :book="itemAt(row.index * gridCols + col - 1)!"
                     :query-key="queryKey"
+                    :is-focused="
+                      row.index * gridCols + col - 1 === focusedIndex
+                    "
                     :hide-tags="hideLibraryTags"
                     :external-image-viewer-path="
                       config?.externalImageViewerPath
@@ -938,6 +1120,7 @@ const {
                   v-if="itemAt(row.index * listCols + col - 1)"
                   :book="itemAt(row.index * listCols + col - 1)!"
                   :query-key="queryKey"
+                  :is-focused="row.index * listCols + col - 1 === focusedIndex"
                   :hide-tags="hideLibraryTags"
                   :external-image-viewer-path="config?.externalImageViewerPath"
                   :external-archive-viewer-path="

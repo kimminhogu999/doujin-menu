@@ -14,6 +14,7 @@ import {
   extractKoreanTitle,
   normalizeSortBy,
   normalizeSortOrder,
+  clampRating,
 } from "../../../src/main/handlers/bookHandler.js";
 
 // ========== 유닛 테스트: 순수 함수 ==========
@@ -40,6 +41,37 @@ describe("정렬 파라미터 정규화", () => {
     expect(normalizeSortOrder(undefined)).toBe("desc");
     expect(normalizeSortOrder("desc, (SELECT 1)")).toBe("desc");
   });
+
+  it("별점도 정렬 컬럼으로 통과한다", () => {
+    expect(normalizeSortBy("rating")).toBe("rating");
+  });
+});
+
+describe("clampRating", () => {
+  it("0~5는 그대로 통과한다", () => {
+    expect(clampRating(0)).toBe(0);
+    expect(clampRating(3)).toBe(3);
+    expect(clampRating(5)).toBe(5);
+  });
+
+  it("범위를 벗어나면 잘라낸다", () => {
+    expect(clampRating(-1)).toBe(0);
+    expect(clampRating(6)).toBe(5);
+    expect(clampRating(999)).toBe(5);
+  });
+
+  it("정수가 아니면 반올림한다", () => {
+    expect(clampRating(3.4)).toBe(3);
+    expect(clampRating(3.6)).toBe(4);
+  });
+
+  it("숫자가 아니면 미평가(0)로 떨어진다", () => {
+    expect(clampRating(undefined)).toBe(0);
+    expect(clampRating(null)).toBe(0);
+    expect(clampRating("5")).toBe(0);
+    expect(clampRating(NaN)).toBe(0);
+    expect(clampRating(Infinity)).toBe(0);
+  });
 });
 
 describe("parseSearchQuery", () => {
@@ -47,6 +79,7 @@ describe("parseSearchQuery", () => {
     const result = parseSearchQuery("");
     expect(result.titleTerms).toEqual([]);
     expect(result.idTerms).toEqual([]);
+    expect(result.idRanges).toEqual([]);
     expect(result.artistTerms).toEqual([]);
     expect(result.tagTerms).toEqual([]);
     expect(result.seriesTerms).toEqual([]);
@@ -98,6 +131,59 @@ describe("parseSearchQuery", () => {
     it("id:12345", () => {
       const result = parseSearchQuery("id:12345");
       expect(result.idTerms).toEqual(["12345"]);
+      expect(result.idRanges).toEqual([]);
+    });
+  });
+
+  describe("히토미 ID 범위", () => {
+    it("id:>3000000 → 초과는 경계를 한 칸 민 최소값", () => {
+      const result = parseSearchQuery("id:>3000000");
+      expect(result.idRanges).toEqual([{ min: 3000001 }]);
+      expect(result.idTerms).toEqual([]);
+    });
+
+    it("id:>=3000000 → 이상은 경계 그대로", () => {
+      expect(parseSearchQuery("id:>=3000000").idRanges).toEqual([
+        { min: 3000000 },
+      ]);
+    });
+
+    it("id:<3000000 / id:<=3000000", () => {
+      expect(parseSearchQuery("id:<3000000").idRanges).toEqual([
+        { max: 2999999 },
+      ]);
+      expect(parseSearchQuery("id:<=3000000").idRanges).toEqual([
+        { max: 3000000 },
+      ]);
+    });
+
+    it("id:3000000-3200000 → 양끝 포함 구간", () => {
+      expect(parseSearchQuery("id:3000000-3200000").idRanges).toEqual([
+        { min: 3000000, max: 3200000 },
+      ]);
+    });
+
+    it("id:3200000~3000000 → 거꾸로 적어도 뒤집어 받는다", () => {
+      expect(parseSearchQuery("id:3200000~3000000").idRanges).toEqual([
+        { min: 3000000, max: 3200000 },
+      ]);
+    });
+
+    it("범위 여러 개는 함께 좁힌다", () => {
+      const result = parseSearchQuery("id:>=3000000 id:<=3200000");
+      expect(result.idRanges).toEqual([{ min: 3000000 }, { max: 3200000 }]);
+    });
+
+    it("-id:<3000000 → exclude.idRanges에 분류", () => {
+      const result = parseSearchQuery("-id:<3000000");
+      expect(result.idRanges).toEqual([]);
+      expect(result.exclude.idRanges).toEqual([{ max: 2999999 }]);
+    });
+
+    it("범위가 아닌 값은 기존대로 정확히 일치", () => {
+      const result = parseSearchQuery("id:12345-");
+      expect(result.idRanges).toEqual([]);
+      expect(result.idTerms).toEqual(["12345-"]);
     });
   });
 
@@ -369,6 +455,7 @@ import {
   handleGetNextBook,
   handleGetPrevBook,
   handleCheckBooksExistByHitomiIds,
+  handleSetBookRating,
 } from "../../../src/main/handlers/bookHandler.js";
 import { store as configStore } from "../../../src/main/handlers/configHandler.js";
 
@@ -404,21 +491,76 @@ describe("handleGetBooks - 통합 테스트", () => {
       expect(ids).toHaveLength(2);
     });
 
-    it("readStatus=read → 읽은 책만", async () => {
-      await seedBook(db, { path: "/a", last_read_at: new Date("2024-01-01") });
-      await seedBook(db, { path: "/b", last_read_at: null });
+    it("readStatus=completed → 마지막 페이지까지 본 책만", async () => {
+      await seedBook(db, { path: "/a", current_page: 20, page_count: 20 });
+      await seedBook(db, { path: "/b", current_page: 25, page_count: 20 });
+      await seedBook(db, { path: "/c", current_page: 19, page_count: 20 });
 
-      const ids = await getResultIds({ readStatus: "read" });
-      expect(ids).toHaveLength(1);
+      const ids = await getResultIds({ readStatus: ["completed"] });
+      expect(ids).toHaveLength(2);
     });
 
-    it("readStatus=unread → 안 읽은 책만", async () => {
-      await seedBook(db, { path: "/a", last_read_at: new Date("2024-01-01") });
-      await seedBook(db, { path: "/b", last_read_at: null });
-      await seedBook(db, { path: "/c", last_read_at: null });
+    it("readStatus=reading → 2페이지 이상 봤지만 안 끝낸 책만", async () => {
+      await seedBook(db, { path: "/a", current_page: 2, page_count: 20 });
+      await seedBook(db, { path: "/b", current_page: 19, page_count: 20 });
+      await seedBook(db, { path: "/c", current_page: 20, page_count: 20 });
+      await seedBook(db, { path: "/d", current_page: 1, page_count: 20 });
 
-      const ids = await getResultIds({ readStatus: "unread" });
+      const ids = await getResultIds({ readStatus: ["reading"] });
       expect(ids).toHaveLength(2);
+    });
+
+    it("readStatus=unread → 1페이지에서 멈춘 책도 안 읽음으로 본다", async () => {
+      // 책을 열기만 해도 last_read_at은 채워지므로 그것만으로는 읽었다고 볼 수 없다
+      await seedBook(db, {
+        path: "/a",
+        current_page: 1,
+        page_count: 20,
+        last_read_at: new Date("2024-01-01"),
+      });
+      await seedBook(db, { path: "/b", current_page: 0, page_count: 20 });
+      await seedBook(db, { path: "/c", current_page: null, page_count: 20 });
+      await seedBook(db, { path: "/d", current_page: 5, page_count: 20 });
+
+      const ids = await getResultIds({ readStatus: ["unread"] });
+      expect(ids).toHaveLength(3);
+    });
+
+    it("1페이지짜리 책은 완독으로만 잡히고 안 읽음에는 빠진다", async () => {
+      await seedBook(db, { path: "/a", current_page: 1, page_count: 1 });
+
+      expect(await getResultIds({ readStatus: ["completed"] })).toHaveLength(1);
+      expect(await getResultIds({ readStatus: ["unread"] })).toHaveLength(0);
+      expect(await getResultIds({ readStatus: ["reading"] })).toHaveLength(0);
+    });
+
+    it("세 구간은 서로 겹치지 않고 전체를 덮는다", async () => {
+      const rows = [
+        { current_page: null, page_count: 20 },
+        { current_page: 0, page_count: 20 },
+        { current_page: 1, page_count: 20 },
+        { current_page: 2, page_count: 20 },
+        { current_page: 19, page_count: 20 },
+        { current_page: 20, page_count: 20 },
+        { current_page: 25, page_count: 20 },
+        { current_page: 1, page_count: 1 },
+        // 페이지 수를 모르는 책도 반드시 어느 한 구간에는 잡혀야 한다
+        { current_page: null, page_count: null },
+        { current_page: 5, page_count: null },
+        { current_page: 0, page_count: 0 },
+        { current_page: 5, page_count: 0 },
+      ];
+      for (const [index, row] of rows.entries()) {
+        await seedBook(db, { path: `/book-${index}`, ...row });
+      }
+
+      const unread = await getResultIds({ readStatus: ["unread"] });
+      const reading = await getResultIds({ readStatus: ["reading"] });
+      const completed = await getResultIds({ readStatus: ["completed"] });
+      const union = [...unread, ...reading, ...completed];
+
+      expect(new Set(union).size).toBe(union.length);
+      expect(union).toHaveLength(rows.length);
     });
 
     it("isFavorite=true → 즐겨찾기만", async () => {
@@ -433,15 +575,62 @@ describe("handleGetBooks - 통합 테스트", () => {
       await seedBook(db, { path: "/library/a/book1" });
       await seedBook(db, { path: "/library/b/book2" });
 
-      const ids = await getResultIds({ libraryPath: "/library/a" });
+      const ids = await getResultIds({ libraryPath: ["/library/a"] });
       expect(ids).toHaveLength(1);
     });
 
-    it("libraryPath=all → 전체 조회", async () => {
+    it("libraryPath 빈 배열 → 전체 조회", async () => {
       await seedBook(db, { path: "/library/a/book1" });
       await seedBook(db, { path: "/library/b/book2" });
 
-      const ids = await getResultIds({ libraryPath: "all" });
+      const ids = await getResultIds({ libraryPath: [] });
+      expect(ids).toHaveLength(2);
+    });
+
+    it("libraryPath 여러 개 → 고른 폴더들의 책만", async () => {
+      await seedBook(db, { path: "/library/a/book1" });
+      await seedBook(db, { path: "/library/b/book2" });
+      await seedBook(db, { path: "/library/c/book3" });
+
+      const ids = await getResultIds({
+        libraryPath: ["/library/a", "/library/c"],
+      });
+      expect(ids).toHaveLength(2);
+    });
+
+    it("readStatus 여러 개 → 고른 구간의 합집합", async () => {
+      const unread = await seedBook(db, {
+        path: "/a",
+        current_page: 1,
+        page_count: 20,
+      });
+      const reading = await seedBook(db, {
+        path: "/b",
+        current_page: 10,
+        page_count: 20,
+      });
+      await seedBook(db, { path: "/c", current_page: 20, page_count: 20 });
+
+      const ids = await getResultIds({ readStatus: ["unread", "reading"] });
+      expect(ids).toEqual([unread.id, reading.id].sort());
+    });
+
+    it("readStatus 세 구간 전부 → 전체 조회와 같다", async () => {
+      await seedBook(db, { path: "/a", current_page: 1, page_count: 20 });
+      await seedBook(db, { path: "/b", current_page: 10, page_count: 20 });
+      await seedBook(db, { path: "/c", current_page: 20, page_count: 20 });
+
+      const ids = await getResultIds({
+        readStatus: ["unread", "reading", "completed"],
+      });
+      expect(ids).toHaveLength(3);
+    });
+
+    it("readStatus 빈 배열 → 전체 조회", async () => {
+      await seedBook(db, { path: "/a", current_page: 1, page_count: 20 });
+      await seedBook(db, { path: "/b", current_page: 20, page_count: 20 });
+
+      const ids = await getResultIds({ readStatus: [] });
       expect(ids).toHaveLength(2);
     });
 
@@ -790,24 +979,27 @@ describe("handleGetBooks - 통합 테스트", () => {
         path: "/a",
         title: "테스트",
         is_favorite: true,
-        last_read_at: new Date("2024-01-01"),
+        current_page: 20,
+        page_count: 20,
       });
       await seedBook(db, {
         path: "/b",
         title: "테스트",
         is_favorite: true,
-        last_read_at: null,
+        current_page: 1,
+        page_count: 20,
       });
       await seedBook(db, {
         path: "/c",
         title: "테스트",
         is_favorite: false,
-        last_read_at: new Date("2024-01-01"),
+        current_page: 20,
+        page_count: 20,
       });
 
       const ids = await getResultIds({
         searchQuery: "테스트",
-        readStatus: "read",
+        readStatus: ["completed"],
         isFavorite: true,
       });
       expect(ids).toEqual([book1.id]);
@@ -1262,7 +1454,7 @@ describe("handleGetBooks - 통합 테스트", () => {
     it("존재하지 않는 libraryPath → 빈 결과", async () => {
       await seedBook(db, { path: "/library/a/book1" });
 
-      const ids = await getResultIds({ libraryPath: "/nonexistent" });
+      const ids = await getResultIds({ libraryPath: ["/nonexistent"] });
       expect(ids).toHaveLength(0);
     });
 
@@ -2265,5 +2457,100 @@ describe("handleCheckBooksExistByHitomiIds", () => {
 
     expect(result.success).toBe(true);
     expect(result.data).toEqual({ 999999: book.id });
+  });
+});
+
+describe("별점", () => {
+  let ratingDb: Knex;
+
+  beforeAll(async () => {
+    ratingDb = await createTestDb();
+    dbRef.current = ratingDb;
+  });
+
+  beforeEach(async () => {
+    dbRef.current = ratingDb;
+    await truncateAll(ratingDb);
+  });
+
+  afterAll(async () => {
+    await ratingDb.destroy();
+  });
+
+  it("새 책의 별점 기본값은 미평가(0)다", async () => {
+    const book = await seedBook(ratingDb, { path: "/a" });
+    const row = await ratingDb("Book").where("id", book.id).first();
+    expect(row.rating).toBe(0);
+  });
+
+  it("별점을 저장하고 저장된 값을 돌려준다", async () => {
+    const book = await seedBook(ratingDb, { path: "/a" });
+
+    const result = await handleSetBookRating({ bookId: book.id, rating: 4 });
+
+    expect(result).toEqual({ success: true, rating: 4 });
+    const row = await ratingDb("Book").where("id", book.id).first();
+    expect(row.rating).toBe(4);
+  });
+
+  it("범위를 벗어난 값은 잘라서 저장한다", async () => {
+    const book = await seedBook(ratingDb, { path: "/a" });
+
+    const result = await handleSetBookRating({ bookId: book.id, rating: 99 });
+
+    expect(result.rating).toBe(5);
+    const row = await ratingDb("Book").where("id", book.id).first();
+    expect(row.rating).toBe(5);
+  });
+
+  it("0을 주면 평가가 해제된다", async () => {
+    const book = await seedBook(ratingDb, { path: "/a", rating: 5 });
+
+    await handleSetBookRating({ bookId: book.id, rating: 0 });
+
+    const row = await ratingDb("Book").where("id", book.id).first();
+    expect(row.rating).toBe(0);
+  });
+
+  it("응답에 rating이 실려 온다", async () => {
+    await seedBook(ratingDb, { path: "/a", rating: 3 });
+
+    const result = await handleGetBooks({ pageSize: 1000 });
+
+    expect(result.data[0].rating).toBe(3);
+  });
+
+  it("sortBy=rating, sortOrder=desc → 높은 별점 순", async () => {
+    const low = await seedBook(ratingDb, { path: "/a", rating: 1 });
+    const high = await seedBook(ratingDb, { path: "/b", rating: 5 });
+    const mid = await seedBook(ratingDb, { path: "/c", rating: 3 });
+
+    const result = await handleGetBooks({
+      sortBy: "rating",
+      sortOrder: "desc",
+      pageSize: 1000,
+    });
+
+    expect(result.data.map((b: { id: number }) => b.id)).toEqual([
+      high.id,
+      mid.id,
+      low.id,
+    ]);
+  });
+
+  it("미평가(0)는 내림차순에서 맨 뒤로 간다", async () => {
+    const unrated = await seedBook(ratingDb, { path: "/a" });
+    const rated = await seedBook(ratingDb, { path: "/b", rating: 2 });
+
+    const result = await handleGetBooks({
+      sortBy: "rating",
+      sortOrder: "desc",
+      pageSize: 1000,
+    });
+
+    expect(result.data.map((b: { id: number }) => b.id)).toEqual([
+      rated.id,
+      unrated.id,
+    ]);
   });
 });
