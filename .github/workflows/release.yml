@@ -1,9 +1,13 @@
+
 name: Build & Release
 
 on:
   push:
+    branches:
+      - master
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -19,7 +23,7 @@ jobs:
           - name: build_port_win
             cmd: build:port:win
 
-    name: Build on windows (${{ matrix.cmd  }})
+    name: Build on windows (${{ matrix.cmd }})
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,21 +35,21 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: "pnpm"
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install
 
       - name: Build app
-        run: pnpm run ${{ matrix.cmd  }}
+        run: pnpm run ${{ matrix.cmd }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name  }}
-          path: |
-            dist/
-          if-no-files-found: ignore
+          name: ${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
 
   release:
     if: ${{ github.ref_type == 'tag' }}
