@@ -1,4 +1,3 @@
-```yaml
 name: Build & Release
 
 on:
@@ -14,6 +13,7 @@ permissions:
 
 jobs:
   build:
+    name: Build on Windows (${{ matrix.cmd }})
     runs-on: windows-latest
 
     strategy:
@@ -25,19 +25,17 @@ jobs:
           - name: build_port_win
             cmd: build:port:win
 
-    name: Build on windows (${{ matrix.cmd }})
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6.1.0
+        uses: pnpm/action-setup@v4
         with:
           version: 12.3.4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
@@ -73,7 +71,7 @@ jobs:
             Select-Object -ExpandProperty FullName
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: dist/
@@ -81,13 +79,14 @@ jobs:
           retention-days: 30
 
   release:
+    name: Create GitHub Release
     if: ${{ github.ref_type == 'tag' }}
     needs: build
     runs-on: ubuntu-latest
 
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
@@ -101,5 +100,4 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
-          generate
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc
