@@ -15,6 +15,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+
     strategy:
       matrix:
         include:
@@ -24,15 +25,18 @@ jobs:
             cmd: build:port:win
 
     name: Build on windows (${{ matrix.cmd }})
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6.1.0
+        with:
+          version: 12.3.4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -44,7 +48,7 @@ jobs:
         run: pnpm run ${{ matrix.cmd }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: dist/
@@ -55,9 +59,10 @@ jobs:
     if: ${{ github.ref_type == 'tag' }}
     needs: build
     runs-on: ubuntu-latest
+
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 
