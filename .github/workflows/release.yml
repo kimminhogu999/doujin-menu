@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build on windows (${{ matrix.cmd }})
+    name: Build on Windows (${{ matrix.name }})
     runs-on: windows-latest
 
     strategy:
@@ -46,6 +46,23 @@ jobs:
       - name: Build app
         run: pnpm run ${{ matrix.cmd }}
 
+      - name: Debug build output
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "Current directory:"
+          Get-Location
+
+          Write-Host "`nRoot files and folders:"
+          Get-ChildItem -Force
+
+          Write-Host "`nChecking dist directory:"
+          if (Test-Path "dist") {
+            Get-ChildItem "dist" -Force -Recurse
+          } else {
+            Write-Host "dist directory does not exist"
+          }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
@@ -65,6 +82,11 @@ jobs:
         uses: actions/download-artifact@v6
         with:
           path: artifacts
+
+      - name: Show downloaded artifacts
+        run: |
+          echo "Downloaded files:"
+          find artifacts -type f -print
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
