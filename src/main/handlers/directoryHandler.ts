@@ -749,7 +749,7 @@ export async function scanDirectory(
       const isFile = entryObj.dirent.isFile();
       const isZip = isFile && (ext === ".cbz" || ext === ".zip");
 
-      if (isDirectory || isZip) {
+      if (isDirectory) {
         totalFileCount++;
       }
     }
@@ -790,7 +790,7 @@ export async function scanDirectory(
         const isFile = entryObj.dirent.isFile();
         const isZip = isFile && (ext === ".cbz" || ext === ".zip");
 
-        if (!isDirectory && !isZip) {
+        if (!isDirectory) {
           continue;
         }
 
