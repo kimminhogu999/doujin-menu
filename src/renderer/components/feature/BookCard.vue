@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { LightBadge } from "@/components/ui/badge";
+import TagBadge from "@/components/common/TagBadge.vue";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu";
 import { useBookCard } from "@/composables/useBookCard";
-import { useTagDisplay } from "@/composables/useTagDisplay";
 import { buildBookMetaLine } from "@/lib/bookCard";
 import type { CreditPrefix, MetaField } from "@/lib/cardLayout";
 import { Icon } from "@iconify/vue";
@@ -14,6 +13,7 @@ import BookCardMenuButton from "./parts/BookCardMenuButton.vue";
 import CoverCardShell from "./parts/CoverCardShell.vue";
 import CreditsLine from "./parts/CreditsLine.vue";
 import MetaLine from "./parts/MetaLine.vue";
+import { IS_REMOTE } from "@/lib/runtime";
 
 const props = defineProps<{
   book: Book;
@@ -31,12 +31,9 @@ const emit = defineEmits([
   "selectGroup",
   "toggle-favorite",
   "open-book-folder",
-  "show-details",
-  "show-preview",
+  "show-info",
   "request-delete",
 ]);
-
-const { getTagDisplayInfo } = useTagDisplay();
 
 /**
  * 템플릿에 배열 리터럴을 직접 쓰면 vue-tsc가 `string[]`로 추론해 `MetaField[]`
@@ -118,16 +115,15 @@ const handleCreditSelect = (credit: { prefix: CreditPrefix; name: string }) => {
               "
             >
               <!-- 표지 위 그라디언트에 얹히므로 scrim 톤(반투명)을 쓴다 -->
-              <LightBadge
+              <TagBadge
                 v-for="tag in book.tags"
                 :key="tag.name"
-                :class="getTagDisplayInfo(tag, 'scrim').className"
+                :tag="tag.name"
+                surface="scrim"
                 class="flex-shrink-0"
                 @click.prevent.stop="emit('selectTag', tag.name)"
                 @contextmenu.prevent.stop="emit('excludeTag', tag.name)"
-              >
-                {{ getTagDisplayInfo(tag, "scrim").displayText }}
-              </LightBadge>
+              />
             </div>
             <button
               v-if="book.tags.length > 1"
@@ -171,12 +167,13 @@ const handleCreditSelect = (credit: { prefix: CreditPrefix; name: string }) => {
           <Button
             size="icon-sm"
             variant="secondary"
-            title="미리보기"
-            @click.stop="emit('show-preview', book)"
+            title="책 정보"
+            @click.stop="emit('show-info', book)"
           >
-            <Icon icon="solar:eye-bold-duotone" class="h-4 w-4" />
+            <Icon icon="solar:info-circle-bold-duotone" class="h-4 w-4" />
           </Button>
           <Button
+            v-if="!IS_REMOTE"
             size="icon-sm"
             variant="secondary"
             title="새 창으로 열기"

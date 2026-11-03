@@ -5,6 +5,7 @@
 
 import type { MetaField, MetaPart } from "./cardLayout";
 import { formatPublishDate } from "./formatDate";
+import { tagSearchTerm, toTagParts, type TagSource } from "./tagBadge";
 
 export type CardStatusKind = "owned" | "downloading" | "failed" | "idle";
 
@@ -103,6 +104,88 @@ export const resolveCardStatus = ({
         indeterminate: false,
       };
   }
+};
+
+// 상세 정보 줄
+
+export type DetailRowKey =
+  | "id"
+  | "artist"
+  | "series"
+  | "type"
+  | "language"
+  | "group"
+  | "tag"
+  | "character";
+
+export interface DetailItem {
+  text: string;
+  /** 클릭 복사할 검색어. 공백→밑줄 변환은 복사하는 쪽이 한다 */
+  term: string;
+}
+
+export interface DetailRow {
+  key: DetailRowKey;
+  items: DetailItem[];
+}
+
+/** 상세 정보에 필요한 최소 모양. 갤러리와 라이브러리 책이 같이 쓴다 */
+export interface DetailSource {
+  /** Hitomi ID. info.txt 없이 스캔된 책은 비어 있다 */
+  id?: number | string | null;
+  type?: string;
+  languageName?: { local?: string | null; english?: string | null } | null;
+  artists: string[];
+  groups: string[];
+  series: string[];
+  characters: string[];
+  tags: TagSource[];
+}
+
+/**
+ * 책 정보 패널의 줄들. 값이 없는 줄은 빠진다.
+ */
+export const buildDetailRows = (gallery: DetailSource): DetailRow[] => {
+  const names = (prefix: string, list: string[]): DetailItem[] =>
+    list.map((name) => ({ text: name, term: `${prefix}:${name}` }));
+
+  const languageText =
+    gallery.languageName?.local || gallery.languageName?.english;
+  // 라이브러리 책은 info.txt에 영문 언어명이 없으면 현지어만 있다.
+  // 검색 조건은 두 컬럼을 함께 보므로 현지어로 검색해도 맞는다
+  const languageKey =
+    gallery.languageName?.english?.toLowerCase() || languageText;
+
+  const rows: DetailRow[] = [
+    {
+      key: "id",
+      items: gallery.id ? names("id", [String(gallery.id)]) : [],
+    },
+    { key: "artist", items: names("artist", gallery.artists) },
+    { key: "series", items: names("series", gallery.series) },
+    {
+      key: "type",
+      items: gallery.type ? names("type", [gallery.type]) : [],
+    },
+    {
+      key: "language",
+      items:
+        languageText && languageKey
+          ? [{ text: languageText, term: `language:${languageKey}` }]
+          : [],
+    },
+    { key: "group", items: names("group", gallery.groups) },
+    {
+      key: "tag",
+      items: gallery.tags.map((tag) => ({
+        text: toTagParts(tag).name,
+        term: tagSearchTerm(tag),
+      })),
+    },
+    { key: "character", items: names("character", gallery.characters) },
+  ];
+
+  return rows.filter((row) => row.items.length > 0);
 };
 
 // 메타 한 줄

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDetailRows,
   buildMetaLine,
   resolveCardStatus,
 } from "../../../src/renderer/lib/galleryCard";
@@ -144,5 +145,101 @@ describe("buildMetaLine", () => {
     expect(buildMetaLine({ id: 99 }, ["id"])).toEqual([
       { key: "id", text: "#99" },
     ]);
+  });
+});
+
+describe("buildDetailRows", () => {
+  const FULL = {
+    id: 3184920,
+    type: "doujinshi",
+    languageName: { local: "한국어", english: "Korean" },
+    artists: ["sample artist"],
+    groups: ["circle"],
+    series: ["original"],
+    characters: ["heroine"],
+    tags: [
+      { type: "female", name: "stockings" },
+      { type: "tag", name: "full color" },
+    ],
+  };
+
+  it("정해진 순서로 줄을 내고 항목마다 검색어를 붙인다", () => {
+    const rows = buildDetailRows(FULL);
+    expect(rows.map((row) => row.key)).toEqual([
+      "id",
+      "artist",
+      "series",
+      "type",
+      "language",
+      "group",
+      "tag",
+      "character",
+    ]);
+    expect(rows.find((row) => row.key === "artist")?.items).toEqual([
+      { text: "sample artist", term: "artist:sample artist" },
+    ]);
+    expect(rows.find((row) => row.key === "id")?.items).toEqual([
+      { text: "3184920", term: "id:3184920" },
+    ]);
+  });
+
+  // 검색어 파서는 쿼리 전체를 소문자로 바꾼 뒤 읽는다. 표시는 현지어로 한다
+  it("언어는 현지어로 보여주고 영어 이름 소문자로 검색한다", () => {
+    const language = buildDetailRows(FULL).find(
+      (row) => row.key === "language",
+    );
+    expect(language?.items).toEqual([
+      { text: "한국어", term: "language:korean" },
+    ]);
+  });
+
+  // 라이브러리 카드와 같은 글자로 보이도록 밑줄 이름을 쓴다
+  it("태그는 밑줄 이름으로 보여주고 종류 접두어를 붙여 검색한다", () => {
+    const tag = buildDetailRows(FULL).find((row) => row.key === "tag");
+    expect(tag?.items).toEqual([
+      { text: "stockings", term: "female:stockings" },
+      { text: "full_color", term: "tag:full_color" },
+    ]);
+  });
+
+  // info.txt 없이 스캔된 라이브러리 책
+  it("ID가 없으면 ID 줄도 빠진다", () => {
+    expect(buildDetailRows({ ...FULL, id: undefined })[0].key).toBe("artist");
+  });
+
+  // 라이브러리 책은 영문 언어명이 비어 있을 수 있다. 검색 조건이 두 컬럼을 함께 본다
+  it("영문 언어명이 없으면 현지어로 검색한다", () => {
+    const language = buildDetailRows({
+      ...FULL,
+      languageName: { local: "한국어", english: null },
+    }).find((row) => row.key === "language");
+    expect(language?.items).toEqual([
+      { text: "한국어", term: "language:한국어" },
+    ]);
+  });
+
+  it("라이브러리 태그 문자열도 갤러리 태그와 같은 검색어가 된다", () => {
+    const tag = buildDetailRows({
+      ...FULL,
+      tags: ["female:stockings", "full_color"],
+    }).find((row) => row.key === "tag");
+    expect(tag?.items).toEqual([
+      { text: "stockings", term: "female:stockings" },
+      { text: "full_color", term: "tag:full_color" },
+    ]);
+  });
+
+  it("값이 없는 줄은 통째로 빠지고 ID만 남는다", () => {
+    const rows = buildDetailRows({
+      id: 1,
+      type: "",
+      languageName: null,
+      artists: [],
+      groups: [],
+      series: [],
+      characters: [],
+      tags: [],
+    });
+    expect(rows.map((row) => row.key)).toEqual(["id"]);
   });
 });

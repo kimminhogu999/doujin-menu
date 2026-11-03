@@ -1,7 +1,7 @@
 {
   "name": "doujin-menu",
   "displayName": "동인메뉴판",
-  "version": "1.27.0",
+  "version": "1.28.0",
   "description": "만화책 관리를 위한 데스크톱 어플리케이션",
   "license": "MIT",
   "main": "build/main/main/main.js",
@@ -37,6 +37,7 @@
     "@tanstack/vue-virtual": "^3.13.37",
     "@types/archiver": "^8.0.0",
     "@types/node": "^26.5.0",
+    "@types/qrcode": "^1.5.6",
     "@types/semver": "^7.8.0",
     "@types/yauzl": "^3.4.0",
     "@typescript-eslint/eslint-plugin": "^8.70.0",
@@ -89,6 +90,7 @@
     "knex": "^3.3.0",
     "node-hitomi": "^9.2.0",
     "p-queue": "^9.3.3",
+    "qrcode": "^1.5.4",
     "semver": "^7.8.5",
     "sharp": "^0.35.4",
     "yauzl": "^3.4.0"
